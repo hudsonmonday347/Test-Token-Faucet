@@ -9,6 +9,8 @@
 (define-constant err-invalid-amount (err u105))
 (define-constant err-faucet-disabled (err u106))
 (define-constant err-invalid-recipient (err u107))
+(define-constant err-invalid-referrer (err u108))
+(define-constant err-self-referral (err u109))
 
 (define-data-var token-name (string-ascii 32) "Test Token")
 (define-data-var token-symbol (string-ascii 10) "TEST")
@@ -19,10 +21,14 @@
 (define-data-var faucet-enabled bool true)
 (define-data-var total-supply uint u0)
 (define-data-var max-supply uint u100000000000000)
+(define-data-var referral-bonus uint u100000)
+(define-data-var referral-enabled bool true)
 
 (define-map last-claim-time principal uint)
 (define-map token-balances principal uint)
 (define-map allowances {owner: principal, spender: principal} uint)
+(define-map referrals principal principal)
+(define-map referral-counts principal uint)
 
 (define-read-only (get-name)
   (ok (var-get token-name))
@@ -91,6 +97,22 @@
   )
 )
 
+(define-read-only (get-referrer (user principal))
+  (map-get? referrals user)
+)
+
+(define-read-only (get-referral-count (referrer principal))
+  (default-to u0 (map-get? referral-counts referrer))
+)
+
+(define-read-only (get-referral-bonus)
+  (var-get referral-bonus)
+)
+
+(define-read-only (is-referral-enabled)
+  (var-get referral-enabled)
+)
+
 (define-private (mint-tokens (recipient principal) (amount uint))
   (let (
     (current-balance (get-balance recipient))
@@ -154,6 +176,30 @@
   )
 )
 
+(define-public (claim-with-referral (referrer principal))
+  (let (
+    (claimer tx-sender)
+    (amount (var-get faucet-amount))
+    (bonus (var-get referral-bonus))
+    (current-time burn-block-height)
+    (existing-referrer (map-get? referrals claimer))
+    (referrer-count (get-referral-count referrer))
+  )
+    (asserts! (var-get faucet-enabled) err-faucet-disabled)
+    (asserts! (var-get referral-enabled) err-faucet-disabled)
+    (asserts! (can-claim claimer) err-claim-too-soon)
+    (asserts! (not (is-eq claimer referrer)) err-self-referral)
+    (asserts! (is-none existing-referrer) err-invalid-referrer)
+    (try! (mint-tokens claimer amount))
+    (try! (mint-tokens referrer bonus))
+    (map-set referrals claimer referrer)
+    (map-set referral-counts referrer (+ referrer-count u1))
+    (map-set last-claim-time claimer current-time)
+    (print {action: "claim-referral", claimer: claimer, referrer: referrer, claim-amount: amount, bonus-amount: bonus, time: current-time})
+    (ok {claimed: amount, bonus-paid: bonus})
+  )
+)
+
 (define-public (admin-mint (recipient principal) (amount uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -207,6 +253,25 @@
   )
 )
 
+(define-public (set-referral-bonus (new-bonus uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> new-bonus u0) err-invalid-amount)
+    (var-set referral-bonus new-bonus)
+    (print {action: "set-referral-bonus", bonus: new-bonus})
+    (ok true)
+  )
+)
+
+(define-public (toggle-referral-system)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set referral-enabled (not (var-get referral-enabled)))
+    (print {action: "toggle-referral-system", enabled: (var-get referral-enabled)})
+    (ok (var-get referral-enabled))
+  )
+)
+
 (define-public (approve (spender principal) (amount uint))
   (begin
     (map-set allowances {owner: tx-sender, spender: spender} amount)
@@ -247,6 +312,8 @@
     faucet-amount: (var-get faucet-amount),
     claim-cooldown: (var-get claim-cooldown),
     faucet-enabled: (var-get faucet-enabled),
+    referral-bonus: (var-get referral-bonus),
+    referral-enabled: (var-get referral-enabled),
     contract-owner: contract-owner
   }
 )
