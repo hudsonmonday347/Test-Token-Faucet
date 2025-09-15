@@ -11,6 +11,8 @@
 (define-constant err-invalid-recipient (err u107))
 (define-constant err-invalid-referrer (err u108))
 (define-constant err-self-referral (err u109))
+(define-constant err-batch-limit-exceeded (err u110))
+(define-constant err-batch-empty (err u111))
 
 (define-data-var token-name (string-ascii 32) "Test Token")
 (define-data-var token-symbol (string-ascii 10) "TEST")
@@ -23,6 +25,7 @@
 (define-data-var max-supply uint u100000000000000)
 (define-data-var referral-bonus uint u100000)
 (define-data-var referral-enabled bool true)
+(define-data-var batch-limit uint u50)
 
 (define-map last-claim-time principal uint)
 (define-map token-balances principal uint)
@@ -111,6 +114,10 @@
 
 (define-read-only (is-referral-enabled)
   (var-get referral-enabled)
+)
+
+(define-read-only (get-batch-limit)
+  (var-get batch-limit)
 )
 
 (define-private (mint-tokens (recipient principal) (amount uint))
@@ -272,6 +279,85 @@
   )
 )
 
+(define-public (set-batch-limit (new-limit uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> new-limit u0) err-invalid-amount)
+    (var-set batch-limit new-limit)
+    (print {action: "set-batch-limit", limit: new-limit})
+    (ok true)
+  )
+)
+
+(define-private (process-batch-transfer (transfer-data {recipient: principal, amount: uint}) (acc (response uint uint)))
+  (match acc
+    success-val
+      (let (
+        (recipient (get recipient transfer-data))
+        (amount (get amount transfer-data))
+        (sender-balance (get-balance tx-sender))
+      )
+        (if (and 
+              (> amount u0)
+              (not (is-eq tx-sender recipient))
+              (>= sender-balance amount))
+          (begin
+            (map-set token-balances tx-sender (- sender-balance amount))
+            (map-set token-balances recipient (+ (get-balance recipient) amount))
+            (ok (+ success-val u1)))
+          acc))
+    error-val acc)
+)
+
+(define-private (process-batch-mint (mint-data {recipient: principal, amount: uint}) (acc (response uint uint)))
+  (match acc
+    success-val
+      (let (
+        (recipient (get recipient mint-data))
+        (amount (get amount mint-data))
+        (mint-result (mint-tokens recipient amount))
+      )
+        (match mint-result
+          mint-success (ok (+ success-val u1))
+          mint-error acc))
+    error-val acc)
+)
+
+(define-public (batch-transfer (transfers (list 50 {recipient: principal, amount: uint})))
+  (let (
+    (transfers-count (len transfers))
+    (batch-max (var-get batch-limit))
+    (result (fold process-batch-transfer transfers (ok u0)))
+  )
+    (asserts! (> transfers-count u0) err-batch-empty)
+    (asserts! (<= transfers-count batch-max) err-batch-limit-exceeded)
+    (match result
+      processed-count
+        (begin
+          (print {action: "batch-transfer", count: processed-count, total: transfers-count})
+          (ok processed-count))
+      error-code (err error-code))
+  )
+)
+
+(define-public (batch-mint (mints (list 50 {recipient: principal, amount: uint})))
+  (let (
+    (mints-count (len mints))
+    (batch-max (var-get batch-limit))
+    (result (fold process-batch-mint mints (ok u0)))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (> mints-count u0) err-batch-empty)
+    (asserts! (<= mints-count batch-max) err-batch-limit-exceeded)
+    (match result
+      processed-count
+        (begin
+          (print {action: "batch-mint", count: processed-count, total: mints-count})
+          (ok processed-count))
+      error-code (err error-code))
+  )
+)
+
 (define-public (approve (spender principal) (amount uint))
   (begin
     (map-set allowances {owner: tx-sender, spender: spender} amount)
@@ -314,6 +400,7 @@
     faucet-enabled: (var-get faucet-enabled),
     referral-bonus: (var-get referral-bonus),
     referral-enabled: (var-get referral-enabled),
+    batch-limit: (var-get batch-limit),
     contract-owner: contract-owner
   }
 )
