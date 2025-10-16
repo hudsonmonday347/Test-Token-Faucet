@@ -13,6 +13,10 @@
 (define-constant err-self-referral (err u109))
 (define-constant err-batch-limit-exceeded (err u110))
 (define-constant err-batch-empty (err u111))
+(define-constant err-vesting-not-found (err u112))
+(define-constant err-vesting-locked (err u113))
+(define-constant err-vesting-exists (err u114))
+(define-constant err-invalid-duration (err u115))
 
 (define-data-var token-name (string-ascii 32) "Test Token")
 (define-data-var token-symbol (string-ascii 10) "TEST")
@@ -32,6 +36,10 @@
 (define-map allowances {owner: principal, spender: principal} uint)
 (define-map referrals principal principal)
 (define-map referral-counts principal uint)
+(define-map vesting-schedules 
+  {beneficiary: principal, schedule-id: uint} 
+  {amount: uint, start-block: uint, duration: uint, claimed: uint})
+(define-map vesting-count principal uint)
 
 (define-read-only (get-name)
   (ok (var-get token-name))
@@ -118,6 +126,37 @@
 
 (define-read-only (get-batch-limit)
   (var-get batch-limit)
+)
+
+(define-read-only (get-vesting-schedule (beneficiary principal) (schedule-id uint))
+  (map-get? vesting-schedules {beneficiary: beneficiary, schedule-id: schedule-id})
+)
+
+(define-read-only (get-vesting-count (beneficiary principal))
+  (default-to u0 (map-get? vesting-count beneficiary))
+)
+
+(define-read-only (calculate-vested-amount (beneficiary principal) (schedule-id uint))
+  (match (get-vesting-schedule beneficiary schedule-id)
+    schedule
+      (let (
+        (current-block burn-block-height)
+        (start-block (get start-block schedule))
+        (duration (get duration schedule))
+        (total-amount (get amount schedule))
+        (already-claimed (get claimed schedule))
+        (end-block (+ start-block duration))
+        (elapsed (if (>= current-block start-block) (- current-block start-block) u0))
+      )
+        (if (>= current-block end-block)
+          (- total-amount already-claimed)
+          (let (
+            (vested-total (/ (* total-amount elapsed) duration))
+          )
+            (if (> vested-total already-claimed)
+              (- vested-total already-claimed)
+              u0))))
+    u0)
 )
 
 (define-private (mint-tokens (recipient principal) (amount uint))
@@ -385,6 +424,69 @@
     (map-delete allowances {owner: tx-sender, spender: spender})
     (print {action: "revoke-approval", owner: tx-sender, spender: spender})
     (ok true)
+  )
+)
+
+(define-public (create-vesting-schedule (beneficiary principal) (amount uint) (duration uint))
+  (let (
+    (sender-balance (get-balance tx-sender))
+    (current-count (get-vesting-count beneficiary))
+    (schedule-id (+ current-count u1))
+    (start-block burn-block-height)
+  )
+    (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (> duration u0) err-invalid-duration)
+    (asserts! (>= sender-balance amount) err-insufficient-balance)
+    (asserts! (is-none (get-vesting-schedule beneficiary schedule-id)) err-vesting-exists)
+    (map-set token-balances tx-sender (- sender-balance amount))
+    (map-set vesting-schedules 
+      {beneficiary: beneficiary, schedule-id: schedule-id}
+      {amount: amount, start-block: start-block, duration: duration, claimed: u0})
+    (map-set vesting-count beneficiary schedule-id)
+    (print {action: "create-vesting", beneficiary: beneficiary, schedule-id: schedule-id, amount: amount, duration: duration, start-block: start-block})
+    (ok schedule-id)
+  )
+)
+
+(define-public (claim-vested-tokens (schedule-id uint))
+  (let (
+    (beneficiary tx-sender)
+    (vested-amount (calculate-vested-amount beneficiary schedule-id))
+    (schedule (unwrap! (get-vesting-schedule beneficiary schedule-id) err-vesting-not-found))
+    (current-claimed (get claimed schedule))
+    (new-claimed (+ current-claimed vested-amount))
+  )
+    (asserts! (> vested-amount u0) err-vesting-locked)
+    (map-set vesting-schedules
+      {beneficiary: beneficiary, schedule-id: schedule-id}
+      (merge schedule {claimed: new-claimed}))
+    (map-set token-balances beneficiary (+ (get-balance beneficiary) vested-amount))
+    (print {action: "claim-vested", beneficiary: beneficiary, schedule-id: schedule-id, amount: vested-amount})
+    (ok vested-amount)
+  )
+)
+
+(define-public (cancel-vesting-schedule (beneficiary principal) (schedule-id uint))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary schedule-id) err-vesting-not-found))
+    (total-amount (get amount schedule))
+    (already-claimed (get claimed schedule))
+    (unvested-amount (- total-amount already-claimed))
+    (vested-amount (calculate-vested-amount beneficiary schedule-id))
+    (return-amount (- unvested-amount vested-amount))
+  )
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (if (> vested-amount u0)
+      (map-set token-balances beneficiary (+ (get-balance beneficiary) vested-amount))
+      true)
+    (if (> return-amount u0)
+      (map-set token-balances contract-owner (+ (get-balance contract-owner) return-amount))
+      true)
+    (map-set vesting-schedules
+      {beneficiary: beneficiary, schedule-id: schedule-id}
+      (merge schedule {claimed: total-amount}))
+    (print {action: "cancel-vesting", beneficiary: beneficiary, schedule-id: schedule-id, vested: vested-amount, returned: return-amount})
+    (ok {vested-to-beneficiary: vested-amount, returned-to-owner: return-amount})
   )
 )
 
