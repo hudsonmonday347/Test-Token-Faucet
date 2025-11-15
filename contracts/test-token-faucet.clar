@@ -17,6 +17,7 @@
 (define-constant err-vesting-locked (err u113))
 (define-constant err-vesting-exists (err u114))
 (define-constant err-invalid-duration (err u115))
+(define-constant err-account-frozen (err u116))
 
 (define-data-var token-name (string-ascii 32) "Test Token")
 (define-data-var token-symbol (string-ascii 10) "TEST")
@@ -40,6 +41,7 @@
   {beneficiary: principal, schedule-id: uint} 
   {amount: uint, start-block: uint, duration: uint, claimed: uint})
 (define-map vesting-count principal uint)
+(define-map frozen-accounts principal bool)
 
 (define-read-only (get-name)
   (ok (var-get token-name))
@@ -128,6 +130,10 @@
   (var-get batch-limit)
 )
 
+(define-read-only (is-frozen (who principal))
+  (default-to false (map-get? frozen-accounts who))
+)
+
 (define-read-only (get-vesting-schedule (beneficiary principal) (schedule-id uint))
   (map-get? vesting-schedules {beneficiary: beneficiary, schedule-id: schedule-id})
 )
@@ -193,6 +199,7 @@
   (begin
     (asserts! (or (is-eq tx-sender sender) (is-eq contract-caller sender)) err-not-token-owner)
     (asserts! (> amount u0) err-invalid-amount)
+    (asserts! (not (is-frozen sender)) err-account-frozen)
     (asserts! (not (is-eq sender recipient)) err-invalid-recipient)
     (let (
       (sender-balance (get-balance sender))
@@ -214,6 +221,7 @@
     (current-time burn-block-height)
   )
     (asserts! (var-get faucet-enabled) err-faucet-disabled)
+    (asserts! (not (is-frozen claimer)) err-account-frozen)
     (asserts! (can-claim claimer) err-claim-too-soon)
     (try! (mint-tokens claimer amount))
     (map-set last-claim-time claimer current-time)
@@ -368,6 +376,7 @@
     (batch-max (var-get batch-limit))
     (result (fold process-batch-transfer transfers (ok u0)))
   )
+    (asserts! (not (is-frozen tx-sender)) err-account-frozen)
     (asserts! (> transfers-count u0) err-batch-empty)
     (asserts! (<= transfers-count batch-max) err-batch-limit-exceeded)
     (match result
@@ -399,6 +408,7 @@
 
 (define-public (approve (spender principal) (amount uint))
   (begin
+    (asserts! (not (is-frozen tx-sender)) err-account-frozen)
     (map-set allowances {owner: tx-sender, spender: spender} amount)
     (print {action: "approve", owner: tx-sender, spender: spender, amount: amount})
     (ok true)
@@ -414,6 +424,7 @@
     (allowance (get-allowance owner tx-sender))
   )
     (asserts! (>= allowance amount) err-insufficient-balance)
+    (asserts! (not (is-frozen owner)) err-account-frozen)
     (map-set allowances {owner: owner, spender: tx-sender} (- allowance amount))
     (transfer amount owner recipient memo)
   )
@@ -421,6 +432,7 @@
 
 (define-public (revoke-approval (spender principal))
   (begin
+    (asserts! (not (is-frozen tx-sender)) err-account-frozen)
     (map-delete allowances {owner: tx-sender, spender: spender})
     (print {action: "revoke-approval", owner: tx-sender, spender: spender})
     (ok true)
@@ -436,6 +448,7 @@
   )
     (asserts! (> amount u0) err-invalid-amount)
     (asserts! (> duration u0) err-invalid-duration)
+    (asserts! (not (is-frozen tx-sender)) err-account-frozen)
     (asserts! (>= sender-balance amount) err-insufficient-balance)
     (asserts! (is-none (get-vesting-schedule beneficiary schedule-id)) err-vesting-exists)
     (map-set token-balances tx-sender (- sender-balance amount))
@@ -487,6 +500,24 @@
       (merge schedule {claimed: total-amount}))
     (print {action: "cancel-vesting", beneficiary: beneficiary, schedule-id: schedule-id, vested: vested-amount, returned: return-amount})
     (ok {vested-to-beneficiary: vested-amount, returned-to-owner: return-amount})
+  )
+)
+
+(define-public (freeze-account (who principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set frozen-accounts who true)
+    (print {action: "freeze-account", who: who})
+    (ok true)
+  )
+)
+
+(define-public (unfreeze-account (who principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-delete frozen-accounts who)
+    (print {action: "unfreeze-account", who: who})
+    (ok true)
   )
 )
 
