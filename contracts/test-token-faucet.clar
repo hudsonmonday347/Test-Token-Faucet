@@ -18,6 +18,7 @@
 (define-constant err-vesting-exists (err u114))
 (define-constant err-invalid-duration (err u115))
 (define-constant err-account-frozen (err u116))
+(define-constant err-not-minter (err u117))
 
 (define-data-var token-name (string-ascii 32) "Test Token")
 (define-data-var token-symbol (string-ascii 10) "TEST")
@@ -42,6 +43,7 @@
   {amount: uint, start-block: uint, duration: uint, claimed: uint})
 (define-map vesting-count principal uint)
 (define-map frozen-accounts principal bool)
+(define-map minters principal bool)
 
 (define-read-only (get-name)
   (ok (var-get token-name))
@@ -132,6 +134,10 @@
 
 (define-read-only (is-frozen (who principal))
   (default-to false (map-get? frozen-accounts who))
+)
+
+(define-read-only (is-minter (who principal))
+  (default-to false (map-get? minters who))
 )
 
 (define-read-only (get-vesting-schedule (beneficiary principal) (schedule-id uint))
@@ -262,6 +268,14 @@
   )
 )
 
+(define-public (minter-mint (recipient principal) (amount uint))
+  (begin
+    (asserts! (default-to false (map-get? minters tx-sender)) err-not-minter)
+    (asserts! (> amount u0) err-invalid-amount)
+    (mint-tokens recipient amount)
+  )
+)
+
 (define-public (admin-burn (amount uint))
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
@@ -323,6 +337,24 @@
     (var-set referral-enabled (not (var-get referral-enabled)))
     (print {action: "toggle-referral-system", enabled: (var-get referral-enabled)})
     (ok (var-get referral-enabled))
+  )
+)
+
+(define-public (grant-minter (who principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-set minters who true)
+    (print {action: "grant-minter", who: who})
+    (ok true)
+  )
+)
+
+(define-public (revoke-minter (who principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (map-delete minters who)
+    (print {action: "revoke-minter", who: who})
+    (ok true)
   )
 )
 
